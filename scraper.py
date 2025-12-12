@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os
+import re
 import json
 import hashlib
 import base64
@@ -16,12 +17,11 @@ BRIGHTNESS_THRESHOLD = 130
 BATCH_SIZE = 100
 TEMP_DIR = "temp_download"
 
-# 起始配置
-BASE_URL = "https://img.hyun.cc/index.php/archives/"
+# 起始ID（首次运行时使用）
 START_ID = 342
 
 # 目标私有仓库
-TARGET_REPO = os.environ.get("TARGET_REPO", "")  # 格式: owner/repo
+TARGET_REPO = os.environ.get("TARGET_REPO", "")
 GITHUB_TOKEN = os.environ.get("GH_TOKEN", "")
 TARGET_BRANCH = "main"
 
@@ -70,7 +70,6 @@ def github_upload(path: str, content: bytes, message: str) -> bool:
         "Accept": "application/vnd.github.v3+json"
     }
     
-    # 获取现有文件的SHA（如果存在）
     _, sha = github_get_file(path)
     
     data = {
@@ -104,6 +103,13 @@ def save_remote_json(path: str, data: dict, msg: str) -> bool:
     """保存JSON到目标仓库"""
     content = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
     return github_upload(path, content, msg)
+
+
+# ============ URL 处理 ============
+
+def build_url(page_id: int) -> str:
+    """根据ID构建完整URL"""
+    return f"https://img.hyun.cc/index.php/archives/{page_id}.html"
 
 
 # ============ 工具函数 ============
@@ -200,7 +206,7 @@ def process_page(page_id: int) -> str:
     处理单个页面
     返回: "success" | "empty" | "error"
     """
-    url = f"{BASE_URL}{page_id}.html"
+    url = build_url(page_id)
     
     print(f"\n{'='*50}")
     print(f"📂 处理页面 ID: {page_id}")
@@ -311,29 +317,57 @@ def main():
         return
     
     print(f"📦 目标仓库: {TARGET_REPO}")
-    print(f"📁 存储目录: /{IMAGES_DIR}/")
+    print(f"📁 存储目录: /{IMAGES_DIR}/\n")
     
     # 从目标仓库读取进度
-    progress = get_remote_json("progress.json", {"last_success_id": START_ID - 1})
-    current_id = progress.get("last_success_id", START_ID - 1) + 1
+    progress = get_remote_json("progress.json", {
+        "completed": [],
+        "last_success_id": START_ID - 1
+    })
     
-    print(f"📍 当前进度: 从 ID {current_id} 开始\n")
+    # 确保字段存在
+    if "completed" not in progress:
+        progress["completed"] = []
+    if "last_success_id" not in progress:
+        progress["last_success_id"] = START_ID - 1
+    
+    completed_set = set(progress["completed"])
+    current_id = progress["last_success_id"] + 1
+    
+    print(f"📊 已完成: {len(progress['completed'])} 个页面")
+    print(f"📍 上次成功ID: {progress['last_success_id']}")
+    print(f"📍 本次从 ID {current_id} 开始\n")
     
     # 循环处理
     while True:
+        current_url = build_url(current_id)
+        
+        # 检查是否已完成（防止重复处理）
+        if current_url in completed_set:
+            print(f"⏭️ ID {current_id} 已完成，跳过")
+            current_id += 1
+            continue
+        
         result = process_page(current_id)
         
         if result == "success":
-            # ✅ 成功，保存进度到目标仓库，继续下一个
+            # ✅ 成功，更新进度
+            progress["completed"].append(current_url)
             progress["last_success_id"] = current_id
-            save_remote_json("progress.json", progress, f"Update progress to {current_id}")
-            print(f"💾 进度已保存: {current_id}\n")
+            
+            save_remote_json(
+                "progress.json", 
+                progress, 
+                f"Complete: {current_url}"
+            )
+            print(f"💾 进度已保存: ID {current_id}\n")
+            
             current_id += 1
             
         elif result == "empty":
             # ⏹️ 没有图片，停止执行
             print(f"\n⏹️ 页面 {current_id} 没有图片，停止执行")
-            print(f"💡 下次运行将继续尝试 ID {current_id}")
+            print(f"💡 下次运行将继续尝试: {current_url}")
             break
             
         else:
