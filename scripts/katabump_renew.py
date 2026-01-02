@@ -17,7 +17,7 @@ from playwright.async_api import async_playwright
 
 # 配置
 DASHBOARD_URL = 'https://dashboard.katabump.com'
-SERVER_ID = os.environ.get('KATA_SERVER_ID', '185829') or ''
+SERVER_ID = os.environ.get('KATA_SERVER_ID') or ''
 KATA_EMAIL = os.environ.get('KATA_EMAIL') or ''
 KATA_PASSWORD = os.environ.get('KATA_PASSWORD') or ''
 TG_BOT_TOKEN = os.environ.get('TG_BOT_TOKEN') or ''
