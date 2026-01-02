@@ -1,4 +1,4 @@
-name: weirdhost-auto-add-time
+name: 韩国鸡自动续订
 on:
   schedule:
     - cron: '07 21 */5 * *'  # 每5天 UTC 21点37分
