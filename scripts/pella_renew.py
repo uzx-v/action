@@ -14,7 +14,6 @@ Pella 自动续期脚本 (增强稳定性 - 使用 JavaScript 强制输入绕过
     - TG_CHAT_ID=Telegram 聊天 ID
 """
 
-
 import os
 import time
 import logging
@@ -34,13 +33,11 @@ class PellaAutoRenew:
     LOGIN_URL = "https://www.pella.app/login"
     HOME_URL = "https://www.pella.app/home"
     RENEW_WAIT_TIME = 8
-    WAIT_TIME_AFTER_LOGIN = 15
+    WAIT_TIME_AFTER_LOGIN = 20
 
     def __init__(self, email, password):
         self.email = email
         self.password = password
-        self.telegram_bot_token = os.getenv('TG_BOT_TOKEN', '')
-        self.telegram_chat_id = os.getenv('TG_CHAT_ID', '')
         self.initial_expiry_details = "N/A"
         self.initial_expiry_value = -1.0
         self.server_url = None
@@ -97,14 +94,54 @@ class PellaAutoRenew:
             days_int = int(match_simple.group(1))
             return f"{days_int} 天", float(days_int)
             
-        logger.warning("⚠️ 未找到有效的过期时间格式")
         return "无法提取", -1.0
+
+    def find_and_click_button(self, button_type="continue"):
+        """通用按钮查找和点击方法"""
+        selectors = [
+            "button.cl-formButtonPrimary",
+            "button[data-localization-key='formButtonPrimary']",
+            "//button[.//span[contains(text(), 'Continue')]]",
+            "//button[contains(@class, 'cl-formButtonPrimary')]",
+            "button[type='submit']",
+            "form button"
+        ]
+        
+        for selector in selectors:
+            try:
+                if selector.startswith("//"):
+                    btn = WebDriverWait(self.driver, 3).until(
+                        EC.element_to_be_clickable((By.XPATH, selector))
+                    )
+                else:
+                    btn = WebDriverWait(self.driver, 3).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                    )
+                
+                self.driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+                time.sleep(0.3)
+                self.driver.execute_script("arguments[0].click();", btn)
+                logger.info(f"✅ 点击按钮成功: {selector}")
+                return True
+            except:
+                continue
+        
+        # 最后尝试提交表单
+        try:
+            self.driver.execute_script("document.querySelector('form').submit();")
+            logger.info("✅ 表单提交成功")
+            return True
+        except:
+            pass
+        
+        return False
 
     def login(self):
         logger.info(f"🔑 开始登录流程")
         self.driver.get(self.LOGIN_URL)
+        time.sleep(3)
         
-        def js_set_value_and_trigger(element, value):
+        def js_set_value(element, value):
             self.driver.execute_script(f"arguments[0].value = '{value}';", element)
             self.driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", element)
             self.driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", element)
@@ -113,106 +150,85 @@ class PellaAutoRenew:
         try:
             logger.info("🔍 查找邮箱输入框...")
             email_input = self.wait_for_element_present(By.CSS_SELECTOR, "input[name='identifier']", 15)
-            js_set_value_and_trigger(email_input, self.email)
+            js_set_value(email_input, self.email)
             logger.info("✅ 邮箱输入完成")
         except Exception as e:
             raise Exception(f"❌ 输入邮箱失败: {e}")
             
-        # 2. 点击 Continue
+        # 2. 点击第一个 Continue
         try:
-            logger.info("🔍 查找并点击 Continue 按钮...")
-            continue_btn_1 = self.wait_for_element_clickable(By.XPATH, "//button[contains(., 'Continue')]", 10)
+            logger.info("🔍 点击 Continue 按钮...")
+            time.sleep(1)
             initial_url = self.driver.current_url
-            self.driver.execute_script("arguments[0].click();", continue_btn_1)
-            logger.info("✅ 已点击 Continue 按钮")
             
-            logger.info("⏳ 等待页面 URL 变化...")
+            if not self.find_and_click_button():
+                raise Exception("无法点击 Continue 按钮")
+            
+            logger.info("⏳ 等待页面切换...")
             WebDriverWait(self.driver, 10).until(EC.url_changes(initial_url))
             logger.info("✅ 页面已切换")
+            time.sleep(2)
 
-            # 3. 等待密码输入框
+        except Exception as e:
+            raise Exception(f"❌ 第一步失败: {e}")
+
+        # 3. 输入密码
+        try:
             logger.info("⏳ 等待密码输入框...")
             password_input = self.wait_for_element_present(By.CSS_SELECTOR, "input[type='password']", 15)
             logger.info("✅ 密码输入框已出现")
-
-            # 4. 输入密码
-            js_set_value_and_trigger(password_input, self.password)
+            js_set_value(password_input, self.password)
             logger.info("✅ 密码输入完成")
+        except Exception as e:
+            raise Exception(f"❌ 输入密码失败: {e}")
+
+        # 4. 点击登录按钮
+        try:
+            logger.info("⏳ 等待 2 秒...")
+            time.sleep(2)
+            
+            logger.info("🔍 点击登录按钮...")
+            if not self.find_and_click_button():
+                raise Exception("无法点击登录按钮")
             
         except Exception as e:
-            raise Exception(f"❌ 登录流程失败: {e}")
+            raise Exception(f"❌ 点击登录按钮失败: {e}")
 
-        # 5. 点击登录按钮
+        # 5. 等待登录完成
         try:
-            logger.info("⏳ 等待 3 秒让按钮激活...")
+            logger.info(f"⏳ 等待登录完成...")
+            
+            for i in range(self.WAIT_TIME_AFTER_LOGIN // 2):
+                time.sleep(2)
+                current_url = self.driver.current_url
+                
+                if '/home' in current_url:
+                    logger.info(f"✅ 登录成功")
+                    return True
+                
+                if '/login' not in current_url and '/sign-in' not in current_url:
+                    self.driver.get(self.HOME_URL)
+                    time.sleep(2)
+                    if '/home' in self.driver.current_url:
+                        logger.info(f"✅ 登录成功")
+                        return True
+            
+            # 最后尝试
+            self.driver.get(self.HOME_URL)
             time.sleep(3)
-
-            logger.info("🔍 查找登录按钮...")
+            if '/home' in self.driver.current_url:
+                logger.info(f"✅ 登录成功")
+                return True
             
-            # 使用精确的选择器
-            button_selectors = [
-                # 精确匹配 Clerk 按钮
-                "button.cl-formButtonPrimary",
-                "button[data-localization-key='formButtonPrimary']",
-                # 文本在 span 内的情况
-                "//button[.//span[contains(text(), 'Continue')]]",
-                "//button[contains(@class, 'cl-formButtonPrimary')]",
-                # 备用
-                "button[type='submit']",
-                "form button"
-            ]
-            
-            login_btn = None
-            
-            for selector in button_selectors:
-                try:
-                    if selector.startswith("//"):
-                        # XPath
-                        login_btn = WebDriverWait(self.driver, 3).until(
-                            EC.element_to_be_clickable((By.XPATH, selector))
-                        )
-                    else:
-                        # CSS
-                        login_btn = WebDriverWait(self.driver, 3).until(
-                            EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
-                        )
-                    logger.info(f"✅ 找到按钮: {selector}")
-                    break
-                except:
-                    continue
-            
-            if login_btn:
-                self.driver.execute_script("arguments[0].scrollIntoView(true);", login_btn)
-                time.sleep(0.5)
-                self.driver.execute_script("arguments[0].click();", login_btn)
-                logger.info("✅ 已点击登录按钮")
-            else:
-                raise Exception("❌ 无法找到登录按钮")
+            raise Exception(f"登录超时，当前URL: {self.driver.current_url}")
             
         except Exception as e:
-            logger.warning(f"⚠️ 点击失败: {e}，尝试提交表单")
-            self.driver.execute_script("document.querySelector('form').submit();")
-            
-        # 6. 等待登录完成
-        try:
-            WebDriverWait(self.driver, self.WAIT_TIME_AFTER_LOGIN).until(
-                EC.url_to_be(self.HOME_URL)
-            )
-            logger.info(f"✅ 登录成功")
-            return True
-        except TimeoutException:
-            try:
-                error_elem = self.driver.find_element(By.CSS_SELECTOR, ".cl-alert-danger, [data-testid*='error']")
-                if error_elem.is_displayed():
-                    raise Exception(f"❌ 登录失败: {error_elem.text.strip()}")
-            except NoSuchElementException:
-                pass
-            raise Exception("⚠️ 登录超时")
+            raise Exception(f"❌ 登录验证失败: {e}")
 
     def get_server_url(self):
         logger.info("🔍 查找服务器链接...")
         
-        if not self.driver.current_url.startswith(self.HOME_URL):
+        if '/home' not in self.driver.current_url:
             self.driver.get(self.HOME_URL)
             time.sleep(3)
             
@@ -242,29 +258,21 @@ class PellaAutoRenew:
             raise Exception("❌ 无法提取初始过期时间")
 
         try:
-            renew_link_selectors = "a[href*='/renew/']:not(.opacity-50):not(.pointer-events-none)"
+            renew_selector = "a[href*='/renew/']:not(.opacity-50):not(.pointer-events-none)"
             renewed_count = 0
             original_window = self.driver.current_window_handle
             
             while True:
-                renew_buttons = self.driver.find_elements(By.CSS_SELECTOR, renew_link_selectors)
-                
+                renew_buttons = self.driver.find_elements(By.CSS_SELECTOR, renew_selector)
                 if not renew_buttons:
                     break
 
-                button = renew_buttons[0]
-                renew_url = button.get_attribute('href')
+                renew_url = renew_buttons[0].get_attribute('href')
                 logger.info(f"🚀 处理第 {renewed_count + 1} 个续期链接")
                 
                 self.driver.execute_script("window.open(arguments[0]);", renew_url)
                 time.sleep(1)
                 self.driver.switch_to.window(self.driver.window_handles[-1])
-
-                try:
-                    WebDriverWait(self.driver, 5).until(EC.url_contains("/renew/"))
-                except:
-                    pass
-
                 time.sleep(self.RENEW_WAIT_TIME)
                 self.driver.close()
                 self.driver.switch_to.window(original_window)
@@ -275,23 +283,17 @@ class PellaAutoRenew:
 
             if renewed_count == 0:
                 disabled = self.driver.find_elements(By.CSS_SELECTOR, "a[href*='/renew/'].opacity-50")
-                if disabled:
-                    return "⏳ 今日已续期"
-                return "⏳ 未找到续期按钮"
+                return "⏳ 今日已续期" if disabled else "⏳ 未找到续期按钮"
 
-            if renewed_count > 0:
-                self.driver.get(self.server_url)
-                time.sleep(5)
-                
-                final_details, final_value = self.extract_expiry_days(self.driver.page_source)
-                logger.info(f"ℹ️ 最终过期时间: {final_details}")
-                
-                if final_value > self.initial_expiry_value:
-                    return f"✅ 续期成功! {self.initial_expiry_details} -> {final_details}"
-                elif final_value == self.initial_expiry_value:
-                    return f"⚠️ 天数未变化 ({final_details})"
-                else:
-                    return f"❌ 天数下降! {self.initial_expiry_details} -> {final_details}"
+            self.driver.get(self.server_url)
+            time.sleep(5)
+            
+            final_details, final_value = self.extract_expiry_days(self.driver.page_source)
+            logger.info(f"ℹ️ 最终过期时间: {final_details}")
+            
+            if final_value > self.initial_expiry_value:
+                return f"✅ 续期成功! {self.initial_expiry_details} -> {final_details}"
+            return f"⚠️ 天数未变化 ({final_details})"
 
         except Exception as e:
             raise Exception(f"❌ 续期错误: {e}")
@@ -305,15 +307,11 @@ class PellaAutoRenew:
                     result = self.renew_server()
                     logger.info(f"📋 结果: {result}")
                     return True, result
-                else:
-                    return False, "❌ 无法获取服务器URL"
-            else:
-                return False, "❌ 登录失败"
+            return False, "❌ 登录或获取服务器失败"
                 
         except Exception as e:
-            error_msg = f"❌ 失败: {str(e)}"
-            logger.error(error_msg)
-            return False, error_msg
+            logger.error(f"❌ 失败: {str(e)}")
+            return False, f"❌ 失败: {str(e)}"
         
         finally:
             if self.driver:
@@ -327,29 +325,25 @@ class MultiAccountManager:
     
     def load_accounts(self):
         accounts = []
-        logger.info("⏳ 开始加载账号配置...")
+        logger.info("⏳ 加载账号配置...")
         
         accounts_str = os.getenv('PELLA_ACCOUNTS', os.getenv('LEAFLOW_ACCOUNTS', '')).strip()
         if accounts_str:
-            try:
-                account_pairs = [p.strip() for p in re.split(r'[;,]', accounts_str) if p.strip()]
-                for pair in account_pairs:
-                    if ':' in pair:
-                        email, password = pair.split(':', 1)
-                        if email.strip() and password.strip():
-                            accounts.append({'email': email.strip(), 'password': password.strip()})
-                if accounts:
-                    logger.info(f"👉 加载了 {len(accounts)} 个账号")
-                    return accounts
-            except Exception as e:
-                logger.error(f"❌ 解析失败: {e}")
+            for pair in [p.strip() for p in re.split(r'[;,]', accounts_str) if p.strip()]:
+                if ':' in pair:
+                    email, password = pair.split(':', 1)
+                    if email.strip() and password.strip():
+                        accounts.append({'email': email.strip(), 'password': password.strip()})
+            if accounts:
+                logger.info(f"👉 加载了 {len(accounts)} 个账号")
+                return accounts
         
         email = os.getenv('PELLA_EMAIL', os.getenv('LEAFLOW_EMAIL', '')).strip()
         password = os.getenv('PELLA_PASSWORD', os.getenv('LEAFLOW_PASSWORD', '')).strip()
         
         if email and password:
             accounts.append({'email': email, 'password': password})
-            logger.info("👉 加载了单个账号配置")
+            logger.info("👉 加载了单个账号")
             return accounts
         
         raise ValueError("⚠️ 未找到有效账号配置")
@@ -359,13 +353,11 @@ class MultiAccountManager:
             return
         
         try:
-            success_count = sum(1 for _, s, r in results if s and "续期成功" in r)
-            message = f"🎁 Pella续期通知\n📋 共 {len(results)} 个账号\n✅ 成功: {success_count}\n\n"
-            
+            message = f"🎁 Pella续期通知\n📋 共 {len(results)} 个账号\n\n"
             for email, success, result in results:
-                status = "✅" if success and "成功" in result else ("⏳" if "已续期" in result else "❌")
+                status = "✅" if "成功" in result else ("⏳" if "已续期" in result else "❌")
                 masked = email[:3] + "***@" + email.split('@')[1] if '@' in email else email[:3] + "***"
-                message += f"{status} {masked}: {result[:80]}\n"
+                message += f"{status} {masked}: {result[:60]}\n"
             
             requests.post(
                 f"https://api.telegram.org/bot{self.telegram_bot_token}/sendMessage",
@@ -400,8 +392,8 @@ class MultiAccountManager:
 def main():
     try:
         manager = MultiAccountManager()
-        success, _ = manager.run_all()
-        exit(0 if success else 0)
+        manager.run_all()
+        exit(0)
     except Exception as e:
         logger.error(f"❌ 错误: {e}")
         exit(1)
