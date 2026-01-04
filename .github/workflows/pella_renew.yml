@@ -2,8 +2,7 @@ name: Pella 自动续期
 
 on:
   schedule:
-    # 每天 UTC 0点运行（北京时间 8:00）
-    - cron: '0 0 * * *'
+    - cron: '18 4 * * *'  # 每天北京时间 12:18 运行
   workflow_dispatch:  # 允许手动触发
 
 jobs:
