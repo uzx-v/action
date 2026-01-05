@@ -3,6 +3,16 @@
 """
 Castle-Host 服务器自动续约脚本
 功能：自动续期 + Cookie自动更新 + GitHub Secrets同步
+
+配置变量说明:
+- 账号变量:
+    - CASTLE_COOKIES=格式：PHPSESSID=ohxxxxxks5q; uid=R0RsTHxxxxx25b
+    - SERVER_ID=服务器 ID 默认：117954 
+- GITHUB Token:
+    - REPO_TOKEN=ghp_xxxxx 用于自动更新 Cookie
+- 通知变量 (可选):
+    - TG_BOT_TOKEN=Telegram 机器人 Token
+    - TG_CHAT_ID=Telegram 聊天 ID
 """
 
 import os
