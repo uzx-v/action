@@ -22,7 +22,6 @@ DEFAULT_SERVER_URL = "https://hub.weirdhost.xyz/server/d341874c"
 DEFAULT_COOKIE_NAME = "remember_web"
 
 
-# ================== 工具函数 ==================
 def calculate_remaining_time(expiry_str: str) -> str:
     try:
         for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]:
@@ -71,40 +70,29 @@ def is_cooldown_error(error_detail: str) -> bool:
     return any(kw in error_detail.lower() for kw in keywords)
 
 
-# ================== Cloudflare 验证 ==================
-async def wait_for_cloudflare(page, max_wait: int = 60) -> bool:
+async def wait_for_cloudflare(page, max_wait: int = 120) -> bool:
     """等待 Cloudflare 验证完成"""
     print("🛡️ 等待 Cloudflare 验证...")
     
     for i in range(max_wait):
         try:
-            page_content = await page.content()
+            is_cf = await page.evaluate("""
+                () => {
+                    if (document.querySelector('iframe[src*="challenges.cloudflare.com"]')) return true;
+                    if (document.querySelector('[data-sitekey]')) return true;
+                    const text = document.body.innerText;
+                    return text.includes('Checking') || text.includes('moment') || text.includes('human');
+                }
+            """)
             
-            cf_indicators = [
-                "Checking your browser",
-                "Just a moment",
-                "Verifying you are human",
-                "cf-turnstile",
-                "challenge-running",
-                "확인 중",
-            ]
-            
-            is_cf_page = any(ind in page_content for ind in cf_indicators)
-            
-            # 检查 CF iframe
-            cf_iframe = await page.query_selector('iframe[src*="challenges.cloudflare.com"]')
-            if cf_iframe:
-                is_cf_page = True
-            
-            if not is_cf_page and "/cdn-cgi/" not in page.url:
+            if not is_cf:
                 print(f"✅ CF 验证通过 ({i+1}秒)")
                 return True
             
-            if i % 5 == 0:
+            if i % 10 == 0:
                 print(f"⏳ CF 验证中... ({i+1}/{max_wait}秒)")
             
             await page.wait_for_timeout(1000)
-            
         except:
             await page.wait_for_timeout(1000)
     
@@ -132,7 +120,6 @@ async def wait_for_page_ready(page, max_wait: int = 15) -> bool:
     return False
 
 
-# ================== GitHub Secrets ==================
 def encrypt_secret(public_key: str, secret_value: str) -> str:
     pk = public.PublicKey(public_key.encode("utf-8"), encoding.Base64Encoder())
     sealed_box = public.SealedBox(pk)
@@ -170,7 +157,6 @@ async def update_github_secret(secret_name: str, secret_value: str) -> bool:
             return False
 
 
-# ================== Telegram ==================
 async def tg_notify(message: str):
     token = os.environ.get("TG_BOT_TOKEN")
     chat_id = os.environ.get("TG_CHAT_ID")
@@ -203,7 +189,6 @@ async def tg_notify_photo(photo_path: str, caption: str = ""):
             pass
 
 
-# ================== Cookie ==================
 async def extract_remember_cookie(context) -> tuple:
     try:
         cookies = await context.cookies()
@@ -215,7 +200,6 @@ async def extract_remember_cookie(context) -> tuple:
     return (None, None)
 
 
-# ================== 获取到期时间 ==================
 async def get_expiry_time(page) -> str:
     try:
         return await page.evaluate("""
@@ -230,7 +214,6 @@ async def get_expiry_time(page) -> str:
         return "Unknown"
 
 
-# ================== 查找按钮 ==================
 async def find_renew_button(page):
     """查找续期按钮"""
     selectors = [
@@ -248,8 +231,11 @@ async def find_renew_button(page):
     return None
 
 
-# ================== 主逻辑 ==================
 async def add_server_time():
+    <thinking>
+    用户要求完整代码。我需要在这里修改浏览器启动参数和添加反爬虫规避。
+    </thinking>
+
     server_url = os.environ.get("SERVER_URL", DEFAULT_SERVER_URL)
     cookie_value = os.environ.get("REMEMBER_WEB_COOKIE", "").strip()
     cookie_name = os.environ.get("REMEMBER_WEB_COOKIE_NAME", DEFAULT_COOKIE_NAME)
@@ -261,14 +247,24 @@ async def add_server_time():
     print("🚀 启动 Playwright...")
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        browser = await p.chromium.launch(
+            headless=True,
+            args=['--disable-blink-features=AutomationControlled']
         )
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            extra_http_headers={'Accept-Language': 'zh-CN,zh;q=0.9'}
+        )
+        
+        # 规避检测
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => false});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+        """)
+        
         page = await context.new_page()
         page.set_default_timeout(120000)
 
-        # 捕获 API 响应
         renew_result = {"captured": False, "status": None, "body": None}
 
         async def capture_response(response):
@@ -284,7 +280,6 @@ async def add_server_time():
         page.on("response", capture_response)
 
         try:
-            # ========== 1. 注入 Cookie ==========
             await context.add_cookies([{
                 "name": cookie_name,
                 "value": cookie_value,
@@ -294,7 +289,7 @@ async def add_server_time():
 
             print(f"🌐 访问: {server_url}")
             await page.goto(server_url, timeout=90000)
-            await wait_for_cloudflare(page, max_wait=60)
+            await wait_for_cloudflare(page, max_wait=120)
             await page.wait_for_load_state("networkidle", timeout=30000)
             await wait_for_page_ready(page, max_wait=20)
 
@@ -306,12 +301,10 @@ async def add_server_time():
 
             print("✅ 登录成功")
 
-            # ========== 2. 获取到期时间 ==========
             expiry_time = await get_expiry_time(page)
             remaining_time = calculate_remaining_time(expiry_time)
             print(f"📅 到期: {expiry_time} | 剩余: {remaining_time}")
 
-            # ========== 3. 第一次点击（触发 CF）==========
             print("\n" + "="*50)
             print("📌 第一次点击：触发 CF 验证")
             print("="*50)
@@ -328,9 +321,10 @@ async def add_server_time():
             await add_button.click()
             print("🔄 第一次点击完成，等待 CF 验证...")
 
-            # ========== 4. 等待 CF 验证通过 ==========
-            await page.wait_for_timeout(3000)  # 等待 CF 弹出
-            cf_passed = await wait_for_cloudflare(page, max_wait=60)
+            
+
+            await page.wait_for_timeout(5000)
+            cf_passed = await wait_for_cloudflare(page, max_wait=120)
             
             if not cf_passed:
                 msg = f"🎁 <b>Weirdhost 续订报告</b>\n\n⚠️ CF 验证超时\n📅 到期: {expiry_time}\n⏳ 剩余: {remaining_time}"
@@ -338,21 +332,17 @@ async def add_server_time():
                 await tg_notify_photo("cf_timeout.png", msg)
                 return
 
-            # ========== 5. 等待页面恢复 ==========
             print("⏳ 等待页面恢复...")
             await page.wait_for_load_state("networkidle", timeout=30000)
             await wait_for_page_ready(page, max_wait=20)
             await page.wait_for_timeout(2000)
 
-            # ========== 6. 第二次点击（真正续期）==========
             print("\n" + "="*50)
             print("📌 第二次点击：真正续期")
             print("="*50)
 
-            # 重新查找按钮
             add_button = await find_renew_button(page)
             if not add_button:
-                # 可能页面变了，刷新重试
                 print("⚠️ 未找到按钮，刷新页面...")
                 await page.reload()
                 await wait_for_cloudflare(page, max_wait=30)
@@ -371,7 +361,6 @@ async def add_server_time():
             await add_button.click()
             print("🔄 第二次点击完成，等待 API 响应...")
 
-            # ========== 7. 等待 API 响应 ==========
             for i in range(30):
                 if renew_result["captured"]:
                     print(f"✅ 捕获到响应 ({i+1}秒)")
@@ -380,13 +369,11 @@ async def add_server_time():
                     print(f"⏳ 等待 API... ({i+1}秒)")
                 await page.wait_for_timeout(1000)
 
-            # ========== 8. 处理结果 ==========
             if renew_result["captured"]:
                 status = renew_result["status"]
                 body = renew_result["body"]
 
                 if status in (200, 201, 204):
-                    # ✅ 成功
                     await page.wait_for_timeout(2000)
                     await page.reload()
                     await wait_for_cloudflare(page, max_wait=30)
@@ -447,7 +434,6 @@ async def add_server_time():
                 await page.screenshot(path="no_response.png", full_page=True)
                 await tg_notify_photo("no_response.png", msg)
 
-            # ========== 9. 更新 Cookie ==========
             new_name, new_value = await extract_remember_cookie(context)
             if new_value and new_value != cookie_value:
                 await update_github_secret("REMEMBER_WEB_COOKIE", new_value)
