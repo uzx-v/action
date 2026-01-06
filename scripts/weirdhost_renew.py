@@ -232,6 +232,7 @@ async def find_renew_button(page):
 
 
 async def add_server_time():
+
     server_url = os.environ.get("SERVER_URL", DEFAULT_SERVER_URL)
     cookie_value = os.environ.get("REMEMBER_WEB_COOKIE", "").strip()
     cookie_name = os.environ.get("REMEMBER_WEB_COOKIE_NAME", DEFAULT_COOKIE_NAME)
@@ -326,11 +327,14 @@ async def add_server_time():
                 return
 
             print("⏳ 等待页面恢复...")
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(8000)
             
-            # 等待按钮出现而不是 networkidle
+            # 诊断截图
+            await page.screenshot(path="after_cf.png", full_page=True)
+            print("📸 已保存诊断截图: after_cf.png")
+            
             try:
-                await page.wait_for_selector('button', timeout=10000)
+                await page.wait_for_selector('button', timeout=5000)
             except:
                 pass
             await page.wait_for_timeout(2000)
@@ -344,9 +348,9 @@ async def add_server_time():
                 print("⚠️ 未找到按钮，刷新页面...")
                 await page.reload()
                 await wait_for_cloudflare(page, max_wait=30)
-                await page.wait_for_timeout(2000)
+                await page.wait_for_timeout(5000)
                 try:
-                    await page.wait_for_selector('button', timeout=10000)
+                    await page.wait_for_selector('button', timeout=5000)
                 except:
                     pass
                 add_button = await find_renew_button(page)
@@ -378,7 +382,7 @@ async def add_server_time():
                     await page.wait_for_timeout(2000)
                     await page.reload()
                     await wait_for_cloudflare(page, max_wait=30)
-                    await page.wait_for_timeout(2000)
+                    await page.wait_for_timeout(3000)
                     new_expiry = await get_expiry_time(page)
                     new_remaining = calculate_remaining_time(new_expiry)
                     
