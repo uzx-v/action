@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
+"""
+weirdhost-auto - main.py
+功能：自动续期（两次点击：第一次触发CF，第二次真正续期）
+"""
 import os
 import asyncio
 import aiohttp
@@ -323,19 +326,44 @@ async def add_server_time():
                 return
 
             print("⏳ 等待复选框...")
-            # 等待并点击复选框
+            # 尝试点击 Cloudflare 验证框内的复选框
+            checkbox_clicked = False
+            
+            # 方法1：点击 input[type="checkbox"]
             try:
-                checkbox = await page.wait_for_selector('input[type="checkbox"]', timeout=10000)
+                checkbox = await page.wait_for_selector('input[type="checkbox"]', timeout=5000)
                 await checkbox.click()
                 print("✅ 已点击复选框")
-                await page.wait_for_timeout(3000)
+                checkbox_clicked = True
+                await page.wait_for_timeout(5000)
             except:
+                pass
+            
+            # 方法2：通过 JavaScript 点击
+            if not checkbox_clicked:
+                try:
+                    await page.evaluate("""
+                        () => {
+                            const checkbox = document.querySelector('input[type="checkbox"]');
+                            if (checkbox) {
+                                checkbox.click();
+                                return true;
+                            }
+                            return false;
+                        }
+                    """)
+                    print("✅ 已通过 JS 点击复选框")
+                    checkbox_clicked = True
+                    await page.wait_for_timeout(5000)
+                except:
+                    pass
+            
+            if not checkbox_clicked:
                 print("⚠️ 未找到复选框，继续...")
 
             print("⏳ 等待页面恢复...")
             await page.wait_for_timeout(8000)
             
-            # 诊断截图
             await page.screenshot(path="after_cf.png", full_page=True)
             print("📸 已保存诊断截图: after_cf.png")
             
