@@ -232,10 +232,6 @@ async def find_renew_button(page):
 
 
 async def add_server_time():
-    <thinking>
-    用户要求完整代码。我需要在这里修改浏览器启动参数和添加反爬虫规避。
-    </thinking>
-
     server_url = os.environ.get("SERVER_URL", DEFAULT_SERVER_URL)
     cookie_value = os.environ.get("REMEMBER_WEB_COOKIE", "").strip()
     cookie_name = os.environ.get("REMEMBER_WEB_COOKIE_NAME", DEFAULT_COOKIE_NAME)
