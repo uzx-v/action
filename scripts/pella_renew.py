@@ -54,16 +54,6 @@ def mask_url(url):
     return url
 
 
-def escape_markdown_v2(text):
-    """转义 MarkdownV2 特殊字符"""
-    if not text:
-        return ""
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    for char in special_chars:
-        text = text.replace(char, f'\\{char}')
-    return text
-
-
 class PellaAutoRenew:
     LOGIN_URL = "https://www.pella.app/login"
     HOME_URL = "https://www.pella.app/home"
@@ -539,113 +529,109 @@ class MultiAccountManager:
         raise ValueError("❌ 未找到账号配置")
     
     def send_notification(self, results):
-        """发送通知 - 每个账号单独一条消息"""
+        """发送通知 - 每个账号单独一条消息，日志作为文件"""
         if not self.tg_token or not self.tg_chat:
             return
         
         for email, success, result, restart_output in results:
             try:
                 self._send_single_notification(email, success, result, restart_output)
-                time.sleep(0.5)  # 避免发送过快
+                time.sleep(0.5)
             except Exception as e:
                 logger.error(f"❌ 发送 {mask_email(email)} 通知失败: {e}")
     
     def _send_single_notification(self, email, success, result, restart_output):
-        """发送单个账号的通知"""
+        """发送单个账号的通知 - 简洁消息 + 日志文件"""
         try:
-            # 单独发送，日志可以更长
-            max_log_length = 3000
-            
+            # 确定状态图标
             if "成功" in result:
-                status = "📅"
+                status = "✅"
             elif "已续期" in result:
                 status = "📅"
             else:
                 status = "❌"
             
-            msg = f"🎁 *Pella 续期报告*\n"
-            msg += f"⏰ {escape_markdown_v2(datetime.now().strftime('%Y-%m-%d %H:%M'))}\n"
-            msg += escape_markdown_v2("━" * 18) + "\n\n"
-            
-            msg += f"{status} *{escape_markdown_v2(email)}*\n"
-            msg += f"├ 续期: {escape_markdown_v2(result)}\n"
-            
+            # 确定重启状态
             if restart_output:
                 if "App is running" in restart_output or "running" in restart_output.lower():
-                    msg += f"└ 重启: ✅ 完成\n"
+                    restart_status = "✅ 完成"
                 else:
-                    msg += f"└ 重启: ⚠️ 未确认\n"
-                
-                log_text = restart_output[:max_log_length]
-                if len(restart_output) > max_log_length:
-                    log_text += "\n... (已截断)"
-                
-                msg += f"📜 重启日志 \\(点击展开\\)\n"
-                msg += f"||{escape_markdown_v2(log_text)}||\n"
+                    restart_status = "⚠️ 未确认"
             else:
-                msg += f"└ 重启: ⚠️ 无输出\n"
+                restart_status = "⚠️ 无输出"
             
-            response = requests.post(
-                f"https://api.telegram.org/bot{self.tg_token}/sendMessage",
-                data={
-                    "chat_id": self.tg_chat,
-                    "text": msg,
-                    "parse_mode": "MarkdownV2"
-                },
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                logger.info(f"✅ {mask_email(email)} 通知已发送")
-            else:
-                logger.warning(f"⚠️ MarkdownV2 发送失败，尝试纯文本")
-                self._send_single_plain(email, result, restart_output)
-                
-        except Exception as e:
-            logger.error(f"❌ 通知失败: {e}")
-            self._send_single_plain(email, result, restart_output)
-    
-    def _send_single_plain(self, email, result, restart_output):
-        """备用：发送单个账号的纯文本通知"""
-        try:
-            max_log_length = 3000
-            
-            if "成功" in result:
-                status = "📅"
-            elif "已续期" in result:
-                status = "📅"
-            else:
-                status = "❌"
-            
+            # 构建简洁消息
             msg = f"🎁 Pella 续期报告\n"
             msg += f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
             msg += "━" * 18 + "\n\n"
-            
             msg += f"{status} {email}\n"
             msg += f"├ 续期: {result}\n"
+            msg += f"└ 重启: {restart_status}"
             
-            if restart_output:
-                if "App is running" in restart_output:
-                    msg += f"└ 重启: ✅ 完成\n"
-                else:
-                    msg += f"└ 重启: ⚠️ 未确认\n"
-                
-                log_text = restart_output[:max_log_length]
-                if len(restart_output) > max_log_length:
-                    log_text += "\n... (已截断)"
-                msg += f"📜 重启日志 (点击展开)\n{log_text}\n"
-            else:
-                msg += f"└ 重启: ⚠️ 无输出\n"
-            
-            requests.post(
+            # 发送主消息
+            response = requests.post(
                 f"https://api.telegram.org/bot{self.tg_token}/sendMessage",
                 data={"chat_id": self.tg_chat, "text": msg},
                 timeout=10
             )
-            logger.info(f"✅ {mask_email(email)} 纯文本通知已发送")
-                    
+            
+            if response.status_code == 200:
+                logger.info(f"✅ {mask_email(email)} 消息已发送")
+                message_id = response.json().get('result', {}).get('message_id')
+                
+                # 如果有日志，作为文件发送（回复主消息）
+                if restart_output and len(restart_output) > 50:
+                    self._send_log_file(email, restart_output, message_id)
+            else:
+                logger.warning(f"⚠️ 发送失败: {response.text}")
+                
         except Exception as e:
-            logger.error(f"❌ 纯文本通知也失败: {e}")
+            logger.error(f"❌ 通知失败: {e}")
+    
+    def _send_log_file(self, email, log_content, reply_to_message_id=None):
+        """将日志作为文件发送"""
+        try:
+            import io
+            
+            # 创建文件内容
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"restart_log_{timestamp}.txt"
+            
+            # 添加头部信息
+            file_content = f"Pella 重启日志\n"
+            file_content += f"账号: {email}\n"
+            file_content += f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            file_content += "=" * 50 + "\n\n"
+            file_content += log_content
+            
+            # 创建文件对象
+            file_obj = io.BytesIO(file_content.encode('utf-8'))
+            file_obj.name = filename
+            
+            # 发送文件
+            data = {
+                "chat_id": self.tg_chat,
+                "caption": "📜 重启日志",
+                "disable_notification": True  # 静音发送
+            }
+            
+            if reply_to_message_id:
+                data["reply_to_message_id"] = reply_to_message_id
+            
+            response = requests.post(
+                f"https://api.telegram.org/bot{self.tg_token}/sendDocument",
+                data=data,
+                files={"document": (filename, file_obj, "text/plain")},
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                logger.info(f"✅ {mask_email(email)} 日志文件已发送")
+            else:
+                logger.warning(f"⚠️ 日志文件发送失败: {response.text}")
+                
+        except Exception as e:
+            logger.error(f"❌ 发送日志文件失败: {e}")
     
     def run_all(self):
         results = []
