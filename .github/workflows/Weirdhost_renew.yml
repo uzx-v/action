@@ -28,6 +28,8 @@ jobs:
           # Cookie 登录
           REMEMBER_WEB_COOKIE: ${{ secrets.REMEMBER_WEB_COOKIE }}
           REMEMBER_WEB_COOKIE_NAME: ${{ secrets.REMEMBER_WEB_COOKIE_NAME }}
+          # 代理列表 URL
+          PROXY_LIST_URL: ${{ secrets.PROXY_LIST_URL }}
           # 目标服务器
           SERVER_URL: ${{ secrets.SERVER_URL }}
           # Telegram 通知
