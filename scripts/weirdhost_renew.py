@@ -1,90 +1,118 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-import os
-import asyncio
-import aiohttp
-import base64
-import re
-import json
-import subprocess
-import tempfile
-from datetime import datetime
-from urllib.parse import urlparse, parse_qs
-from playwright.async_api import async_playwright
-
-try:
-    from nacl import encoding, public
-    NACL_AVAILABLE = True
-except ImportError:
-    NACL_AVAILABLE = False
-
 DEFAULT_SERVER_URL = "https://hub.weirdhost.xyz/server/d341874c"
 DEFAULT_COOKIE_NAME = "remember_web"
-ENABLE_DIRECT = False  # True 启用直连，False 禁用
+ENABLE_DIRECT = False
 PROXY_LIST_URL = os.environ.get("PROXY_LIST_URL", "")
-HY2_URI = os.environ.get("HY2_URI", "")
-HY2_LOCAL_PORT = 10808
+VLESS_URI = os.environ.get("VLESS_URI", "")
+XRAY_LOCAL_PORT = 10808
 
 
-def parse_hy2_uri(uri: str) -> dict:
-    if not uri.startswith("hysteria2://"):
+def parse_vless_uri(uri: str) -> dict:
+    """解析 vless:// URI"""
+    if not uri.startswith("vless://"):
         return None
     try:
         parsed = urlparse(uri)
-        password = parsed.username
+        uuid = parsed.username
         server = parsed.hostname
         port = parsed.port
         params = parse_qs(parsed.query)
+        
         return {
-            "server": f"{server}:{port}",
-            "auth": password,
-            "tls": {
-                "sni": params.get("sni", [""])[0],
-                "insecure": params.get("insecure", ["0"])[0] == "1"
-            }
+            "uuid": uuid,
+            "server": server,
+            "port": port,
+            "security": params.get("security", ["none"])[0],
+            "sni": params.get("sni", [""])[0],
+            "type": params.get("type", ["tcp"])[0],
+            "flow": params.get("flow", [""])[0],
+            "fp": params.get("fp", [""])[0],
+            "pbk": params.get("pbk", [""])[0],
+            "sid": params.get("sid", [""])[0],
+            "encryption": params.get("encryption", ["none"])[0],
         }
     except:
         return None
 
 
-async def start_hy2_client() -> subprocess.Popen:
-    if not HY2_URI:
+def generate_xray_config(vless: dict, local_port: int) -> dict:
+    """生成 xray 配置"""
+    stream_settings = {"network": vless["type"]}
+    
+    if vless["security"] == "tls":
+        stream_settings["security"] = "tls"
+        stream_settings["tlsSettings"] = {"serverName": vless["sni"]}
+    elif vless["security"] == "reality":
+        stream_settings["security"] = "reality"
+        stream_settings["realitySettings"] = {
+            "serverName": vless["sni"],
+            "fingerprint": vless["fp"] or "chrome",
+            "publicKey": vless["pbk"],
+            "shortId": vless["sid"],
+        }
+    
+    vnext = {
+        "address": vless["server"],
+        "port": vless["port"],
+        "users": [{
+            "id": vless["uuid"],
+            "encryption": vless["encryption"],
+        }]
+    }
+    
+    if vless["flow"]:
+        vnext["users"][0]["flow"] = vless["flow"]
+    
+    return {
+        "inbounds": [{
+            "port": local_port,
+            "listen": "127.0.0.1",
+            "protocol": "socks",
+            "settings": {"udp": True}
+        }],
+        "outbounds": [{
+            "protocol": "vless",
+            "settings": {"vnext": [vnext]},
+            "streamSettings": stream_settings
+        }]
+    }
+
+
+async def start_xray_client() -> subprocess.Popen:
+    """启动 Xray 客户端"""
+    if not VLESS_URI:
         return None
     
-    config = parse_hy2_uri(HY2_URI)
-    if not config:
-        print("⚠️ HY2_URI 解析失败")
+    vless = parse_vless_uri(VLESS_URI)
+    if not vless:
+        print("⚠️ VLESS_URI 解析失败")
         return None
     
-    config["socks5"] = {"listen": f"127.0.0.1:{HY2_LOCAL_PORT}"}
+    config = generate_xray_config(vless, XRAY_LOCAL_PORT)
     
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
         json.dump(config, f)
         config_path = f.name
     
-    print(f"🚀 启动 Hysteria2 客户端...")
+    print(f"🚀 启动 Xray 客户端...")
     
-    # 尝试多个可能的路径
-    for hy_path in ["hysteria", "/usr/local/bin/hysteria", "/tmp/hysteria", "./hysteria"]:
+    for xray_path in ["xray", "/usr/local/bin/xray", "/tmp/xray/xray"]:
         try:
             proc = subprocess.Popen(
-                [hy_path, "client", "-c", config_path],
+                [xray_path, "run", "-c", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )
             await asyncio.sleep(3)
             if proc.poll() is None:
-                print(f"✅ Hysteria2 已启动，本地端口: {HY2_LOCAL_PORT}")
+                print(f"✅ Xray 已启动，本地端口: {XRAY_LOCAL_PORT}")
                 return proc
         except FileNotFoundError:
             continue
         except Exception as e:
-            print(f"❌ {hy_path} 启动失败: {e}")
+            print(f"❌ {xray_path} 启动失败: {e}")
     
-    print("❌ Hysteria2 未安装或启动失败")
+    print("❌ Xray 未安装或启动失败")
     return None
-
 
 async def fetch_residential_proxies() -> list:
     proxies = []
@@ -515,31 +543,31 @@ async def add_server_time():
     server_url = os.environ.get("SERVER_URL", DEFAULT_SERVER_URL)
     cookie_value = os.environ.get("REMEMBER_WEB_COOKIE", "").strip()
     cookie_name = os.environ.get("REMEMBER_WEB_COOKIE_NAME", DEFAULT_COOKIE_NAME)
-    enable_direct = os.environ.get("ENABLE_DIRECT", "").lower() == "true"
 
     if not cookie_value:
         await tg_notify("🎁 <b>Weirdhost 续订报告</b>\n\n❌ REMEMBER_WEB_COOKIE 未设置")
         return
 
     proxies = []
-    hy2_proc = None
+    xray_proc = None
     
-    if HY2_URI:
-        hy2_proc = await start_hy2_client()
-        if hy2_proc:
-            proxies.append((f"socks5://127.0.0.1:{HY2_LOCAL_PORT}", "Hysteria2"))
+    # 优先使用 VLESS
+    if VLESS_URI:
+        xray_proc = await start_xray_client()
+        if xray_proc:
+            proxies.append((f"socks5://127.0.0.1:{XRAY_LOCAL_PORT}", "VLESS"))
     
+    # 获取家宽代理
     print("🚀 获取家宽代理列表...")
     socks_proxies = await fetch_residential_proxies()
     for p in socks_proxies:
         proxies.append((p, p))
     
-    # 只有开关打开时才添加直连
     if ENABLE_DIRECT:
         proxies.append((None, "直连"))
     
     if not proxies:
-        await tg_notify("🎁 <b>Weirdhost 续订报告</b>\n\n❌ 无可用代理，直连已禁用")
+        await tg_notify("🎁 <b>Weirdhost 续订报告</b>\n\n❌ 无可用代理")
         return
     
     try:
@@ -565,9 +593,9 @@ async def add_server_time():
         await tg_notify("🎁 <b>Weirdhost 续订报告</b>\n\n❌ 所有代理均失败")
     
     finally:
-        if hy2_proc:
-            hy2_proc.terminate()
-            print("🛑 Hysteria2 已停止")
+        if xray_proc:
+            xray_proc.terminate()
+            print("🛑 Xray 已停止")
 
 if __name__ == "__main__":
     asyncio.run(add_server_time())
