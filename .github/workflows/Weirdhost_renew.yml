@@ -19,11 +19,11 @@ jobs:
 
       - name: Install Hysteria2
         run: |
-          curl -fsSL https://get.hy2.sh/ | bash || {
-            wget -O /tmp/hysteria https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64
-            chmod +x /tmp/hysteria
-            sudo mv /tmp/hysteria /usr/local/bin/hysteria
-          }
+          wget -q -O /tmp/hysteria https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64 || \
+          curl -fsSL -o /tmp/hysteria https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64
+          chmod +x /tmp/hysteria
+          sudo mv /tmp/hysteria /usr/local/bin/hysteria
+          /usr/local/bin/hysteria version || echo "⚠️ Hysteria2 安装失败"
 
       - name: Install dependencies
         run: |
