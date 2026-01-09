@@ -17,13 +17,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Hysteria2
+      - name: Install Xray
         run: |
-          wget -q -O /tmp/hysteria https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64 || \
-          curl -fsSL -o /tmp/hysteria https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64
-          chmod +x /tmp/hysteria
-          sudo mv /tmp/hysteria /usr/local/bin/hysteria
-          /usr/local/bin/hysteria version || echo "⚠️ Hysteria2 安装失败"
+          wget -q -O /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip -q /tmp/xray.zip -d /tmp/xray
+          chmod +x /tmp/xray/xray
+          sudo mv /tmp/xray/xray /usr/local/bin/xray
+          xray version || echo "⚠️ Xray 安装失败"
 
       - name: Install dependencies
         run: |
