@@ -63,21 +63,25 @@ async def start_hy2_client() -> subprocess.Popen:
         config_path = f.name
     
     print(f"🚀 启动 Hysteria2 客户端...")
-    try:
-        proc = subprocess.Popen(
-            ["/usr/local/bin/hysteria", "client", "-c", config_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        await asyncio.sleep(3)
-        if proc.poll() is None:
-            print(f"✅ Hysteria2 已启动，本地端口: {HY2_LOCAL_PORT}")
-            return proc
-        else:
-            stderr = proc.stderr.read().decode()
-            print(f"❌ Hysteria2 启动失败: {stderr}")
-    except Exception as e:
-        print(f"❌ Hysteria2 启动异常: {e}")
+    
+    # 尝试多个可能的路径
+    for hy_path in ["hysteria", "/usr/local/bin/hysteria", "/tmp/hysteria", "./hysteria"]:
+        try:
+            proc = subprocess.Popen(
+                [hy_path, "client", "-c", config_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            await asyncio.sleep(3)
+            if proc.poll() is None:
+                print(f"✅ Hysteria2 已启动，本地端口: {HY2_LOCAL_PORT}")
+                return proc
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            print(f"❌ {hy_path} 启动失败: {e}")
+    
+    print("❌ Hysteria2 未安装或启动失败")
     return None
 
 
@@ -156,10 +160,9 @@ async def wait_for_cloudflare(page, max_wait: int = 120) -> bool:
                     if (document.querySelector('iframe[src*="challenges.cloudflare.com"]')) return true;
                     if (document.querySelector('[data-sitekey]')) return true;
                     if (document.querySelector('#challenge-running')) return true;
-                    if (document.querySelector('.cf-browser-verification')) return true;
                     const text = document.body.innerText || '';
                     if (text.includes('Checking your browser') || text.includes('Just a moment') || 
-                        text.includes('Verify you are human') || text.includes('DDoS protection')) return true;
+                        text.includes('Verify you are human')) return true;
                     return false;
                 }
             """)
@@ -177,47 +180,25 @@ async def wait_for_cloudflare(page, max_wait: int = 120) -> bool:
 
 
 async def wait_for_turnstile(page, max_wait: int = 60) -> bool:
-    """等待 Turnstile 验证完成"""
     print("🔄 检查 Turnstile 验证...")
-    
     for i in range(max_wait):
         try:
-            # 检查是否有 Turnstile iframe
             has_turnstile = await page.evaluate("""
                 () => {
                     const iframe = document.querySelector('iframe[src*="challenges.cloudflare.com"]');
                     if (!iframe) return false;
-                    // 检查是否已完成（通常会隐藏或移除）
                     const style = window.getComputedStyle(iframe);
-                    if (style.display === 'none' || style.visibility === 'hidden') return false;
-                    return true;
+                    return style.display !== 'none' && style.visibility !== 'hidden';
                 }
             """)
-            
             if not has_turnstile:
                 print(f"✅ Turnstile 验证完成 ({i+1}秒)")
                 return True
-            
-            # 尝试点击 Turnstile checkbox
-            if i == 5 or i == 15:
-                try:
-                    await page.evaluate("""
-                        () => {
-                            const iframe = document.querySelector('iframe[src*="challenges.cloudflare.com"]');
-                            if (iframe) {
-                                iframe.contentDocument?.querySelector('input[type="checkbox"]')?.click();
-                            }
-                        }
-                    """)
-                except:
-                    pass
-            
             if i % 10 == 0:
                 print(f"⏳ Turnstile 验证中... ({i+1}/{max_wait}秒)")
             await page.wait_for_timeout(1000)
         except:
             await page.wait_for_timeout(1000)
-    
     print("⚠️ Turnstile 验证超时")
     return False
 
@@ -236,10 +217,7 @@ async def wait_for_page_ready(page, max_wait: int = 30) -> bool:
                         }
                     }
                     const bodyText = document.body.innerText || '';
-                    if (bodyText.includes('유통기한') || bodyText.includes('Expiry')) {
-                        return true;
-                    }
-                    return false;
+                    return bodyText.includes('유통기한') || bodyText.includes('Expiry');
                 }
             """)
             if ready:
@@ -393,14 +371,15 @@ async def try_renew_with_proxy(proxy_url: str, server_url: str, cookie_name: str
         renew_result = {"captured": False, "status": None, "body": None}
 
         async def capture_response(response):
-            if "/renew" in response.url or "notfreeservers" in response.url:
+            # 只捕获 /renew POST 请求
+            if "/renew" in response.url and response.request.method == "POST":
                 renew_result["captured"] = True
                 renew_result["status"] = response.status
                 try:
                     renew_result["body"] = await response.json()
                 except:
                     renew_result["body"] = await response.text()
-                print(f"📡 API 响应: {response.status} - {response.url}")
+                print(f"📡 续期 API 响应: {response.status}")
 
         page.on("response", capture_response)
         proxy_info = f"\n🌐 代理: {label}" if proxy_url else ""
@@ -439,52 +418,32 @@ async def try_renew_with_proxy(proxy_url: str, server_url: str, cookie_name: str
             await add_button.wait_for(state="visible", timeout=10000)
             await page.wait_for_timeout(1000)
             
-            # 点击续期按钮
             print("📌 点击续期按钮...")
             await add_button.click()
-            
-            # 等待弹窗/Turnstile 出现
             await page.wait_for_timeout(3000)
             
-            # 等待 Turnstile 验证
             await wait_for_turnstile(page, max_wait=60)
             
-            # 尝试点击确认复选框
-            print("⏳ 查找确认复选框...")
-            for attempt in range(3):
+            # 尝试点击复选框
+            for _ in range(3):
                 try:
-                    checkbox = await page.wait_for_selector('input[type="checkbox"]:not([disabled])', timeout=5000)
+                    checkbox = await page.wait_for_selector('input[type="checkbox"]:not([disabled])', timeout=3000)
                     if checkbox:
                         await checkbox.click()
                         print("✅ 已点击复选框")
                         break
                 except:
-                    # 尝试通过 JS 点击
-                    clicked = await page.evaluate("""
-                        () => {
-                            const checkboxes = document.querySelectorAll('input[type="checkbox"]');
-                            for (const cb of checkboxes) {
-                                if (!cb.checked && !cb.disabled) {
-                                    cb.click();
-                                    return true;
-                                }
-                            }
-                            return false;
-                        }
-                    """)
-                    if clicked:
-                        print("✅ 已通过 JS 点击复选框")
-                        break
-                await page.wait_for_timeout(2000)
+                    await page.evaluate("document.querySelector('input[type=\"checkbox\"]:not([disabled])')?.click()")
+                await page.wait_for_timeout(1000)
             
-            # 等待 API 响应
-            print("⏳ 等待 API 响应...")
+            # 等待续期 API 响应
+            print("⏳ 等待续期 API 响应...")
             for i in range(60):
                 if renew_result["captured"]:
-                    print(f"✅ 捕获到响应 ({i+1}秒)")
+                    print(f"✅ 捕获到续期响应 ({i+1}秒)")
                     break
                 if i % 10 == 0 and i > 0:
-                    print(f"⏳ 等待 API... ({i}秒)")
+                    print(f"⏳ 等待中... ({i}秒)")
                 await page.wait_for_timeout(1000)
 
             if renew_result["captured"]:
@@ -492,6 +451,7 @@ async def try_renew_with_proxy(proxy_url: str, server_url: str, cookie_name: str
                 body = renew_result["body"]
 
                 if status in (200, 201, 204):
+                    # 刷新获取新到期时间
                     await page.wait_for_timeout(2000)
                     await page.reload()
                     await wait_for_cloudflare(page, max_wait=30)
@@ -499,10 +459,18 @@ async def try_renew_with_proxy(proxy_url: str, server_url: str, cookie_name: str
                     new_expiry = await get_expiry_time(page)
                     new_remaining = calculate_remaining_time(new_expiry)
                     
-                    msg = f"""🎁 <b>Weirdhost 续订报告</b>
+                    # 检查时间是否真的更新了
+                    if new_expiry != expiry_time:
+                        msg = f"""🎁 <b>Weirdhost 续订报告</b>
 
 ✅ 续期成功！
 📅 新到期时间: {new_expiry}
+⏳ 剩余时间: {new_remaining}{proxy_info}"""
+                    else:
+                        msg = f"""🎁 <b>Weirdhost 续订报告</b>
+
+ℹ️ 续期请求成功，但时间未变化
+📅 到期时间: {new_expiry}
 ⏳ 剩余时间: {new_remaining}{proxy_info}"""
                     await tg_notify(msg)
                     result["success"] = True
@@ -522,11 +490,10 @@ async def try_renew_with_proxy(proxy_url: str, server_url: str, cookie_name: str
                 else:
                     result["message"] = f"HTTP {status}"
             else:
-                # 截图调试
                 await page.screenshot(path="no_response.png", full_page=True)
-                await tg_notify_photo("no_response.png", f"🎁 <b>Weirdhost 续订报告</b>\n\n⚠️ 未检测到 API 响应\n📅 到期: {expiry_time}\n⏳ 剩余: {remaining_time}{proxy_info}")
+                await tg_notify_photo("no_response.png", f"⚠️ 未检测到续期 API 响应\n📅 到期: {expiry_time}{proxy_info}")
                 result["need_retry"] = True
-                result["message"] = "未检测到 API 响应"
+                result["message"] = "未检测到续期 API 响应"
 
             new_name, new_value = await extract_remember_cookie(context)
             if new_value and new_value != cookie_value:
@@ -555,19 +522,16 @@ async def add_server_time():
     proxies = []
     hy2_proc = None
     
-    # 优先使用 Hysteria2
     if HY2_URI:
         hy2_proc = await start_hy2_client()
         if hy2_proc:
             proxies.append((f"socks5://127.0.0.1:{HY2_LOCAL_PORT}", "Hysteria2"))
     
-    # 获取家宽代理
     print("🚀 获取家宽代理列表...")
     socks_proxies = await fetch_residential_proxies()
     for p in socks_proxies:
         proxies.append((p, p))
     
-    # 直连作为最后选项
     proxies.append((None, "直连"))
     
     try:
