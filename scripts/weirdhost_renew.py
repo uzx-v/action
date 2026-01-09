@@ -6,7 +6,11 @@ import asyncio
 import aiohttp
 import base64
 import re
+import json
+import subprocess
+import tempfile
 from datetime import datetime
+from urllib.parse import urlparse, parse_qs
 from playwright.async_api import async_playwright
 
 try:
@@ -18,12 +22,71 @@ except ImportError:
 DEFAULT_SERVER_URL = "https://hub.weirdhost.xyz/server/d341874c"
 DEFAULT_COOKIE_NAME = "remember_web"
 PROXY_LIST_URL = os.environ.get("PROXY_LIST_URL", "")
+HY2_URI = os.environ.get("HY2_URI", "")
+HY2_LOCAL_PORT = 10808
+
+
+def parse_hy2_uri(uri: str) -> dict:
+    """解析 hysteria2:// URI"""
+    if not uri.startswith("hysteria2://"):
+        return None
+    try:
+        parsed = urlparse(uri)
+        password = parsed.username
+        server = parsed.hostname
+        port = parsed.port
+        params = parse_qs(parsed.query)
+        return {
+            "server": f"{server}:{port}",
+            "auth": password,
+            "tls": {
+                "sni": params.get("sni", [""])[0],
+                "insecure": params.get("insecure", ["0"])[0] == "1"
+            }
+        }
+    except:
+        return None
+
+
+async def start_hy2_client() -> subprocess.Popen:
+    """启动 Hysteria2 客户端"""
+    if not HY2_URI:
+        return None
+    
+    config = parse_hy2_uri(HY2_URI)
+    if not config:
+        print("⚠️ HY2_URI 解析失败")
+        return None
+    
+    config["socks5"] = {"listen": f"127.0.0.1:{HY2_LOCAL_PORT}"}
+    
+    # 写入临时配置文件
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        json.dump(config, f)
+        config_path = f.name
+    
+    print(f"🚀 启动 Hysteria2 客户端...")
+    try:
+        proc = subprocess.Popen(
+            ["hysteria", "client", "-c", config_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        await asyncio.sleep(3)  # 等待启动
+        if proc.poll() is None:
+            print(f"✅ Hysteria2 已启动，本地端口: {HY2_LOCAL_PORT}")
+            return proc
+        else:
+            stderr = proc.stderr.read().decode()
+            print(f"❌ Hysteria2 启动失败: {stderr}")
+    except Exception as e:
+        print(f"❌ Hysteria2 启动异常: {e}")
+    return None
 
 
 async def fetch_residential_proxies() -> list:
     proxies = []
     if not PROXY_LIST_URL:
-        print("⚠️ PROXY_LIST_URL 未设置，跳过代理")
         return proxies
     try:
         async with aiohttp.ClientSession() as session:
@@ -255,10 +318,11 @@ async def find_renew_button(page):
     return None
 
 
-async def try_renew_with_proxy(proxy_url: str, server_url: str, cookie_name: str, cookie_value: str) -> dict:
-    """尝试使用指定代理完成续期，返回结果"""
+async def try_renew_with_proxy(proxy_url: str, server_url: str, cookie_name: str, cookie_value: str, proxy_label: str = None) -> dict:
+    """尝试使用指定代理完成续期"""
+    label = proxy_label or proxy_url or "直连"
     print(f"\n{'='*50}")
-    print(f"🔄 尝试代理: {proxy_url or '直连'}")
+    print(f"🔄 尝试: {label}")
     print('='*50)
     
     result = {"success": False, "need_retry": False, "message": "", "new_cookie": None}
@@ -297,7 +361,7 @@ async def try_renew_with_proxy(proxy_url: str, server_url: str, cookie_name: str
                 print(f"📡 API 响应: {response.status}")
 
         page.on("response", capture_response)
-        proxy_info = f"\n🌐 代理: {proxy_url}" if proxy_url else ""
+        proxy_info = f"\n🌐 代理: {label}" if proxy_url else ""
 
         try:
             await context.add_cookies([{"name": cookie_name, "value": cookie_value, "domain": "hub.weirdhost.xyz", "path": "/"}])
@@ -343,7 +407,6 @@ async def try_renew_with_proxy(proxy_url: str, server_url: str, cookie_name: str
                 result["message"] = "CF 验证超时"
                 return result
 
-            print("⏳ 等待复选框...")
             try:
                 checkbox = await page.wait_for_selector('input[type="checkbox"]', timeout=5000)
                 await checkbox.click()
@@ -351,19 +414,14 @@ async def try_renew_with_proxy(proxy_url: str, server_url: str, cookie_name: str
             except:
                 try:
                     await page.evaluate("document.querySelector('input[type=\"checkbox\"]')?.click()")
-                    print("✅ 已通过 JS 点击复选框")
                 except:
-                    print("⚠️ 未找到复选框")
+                    pass
 
-            print("⏳ 等待 API 响应...")
             await page.wait_for_timeout(2000)
             
             for i in range(30):
                 if renew_result["captured"]:
-                    print(f"✅ 捕获到响应 ({i+1}秒)")
                     break
-                if i % 5 == 4:
-                    print(f"⏳ 等待 API... ({i+1}秒)")
                 await page.wait_for_timeout(1000)
 
             if renew_result["captured"]:
@@ -382,9 +440,7 @@ async def try_renew_with_proxy(proxy_url: str, server_url: str, cookie_name: str
 
 ✅ 续期成功！
 📅 新到期时间: {new_expiry}
-⏳ 剩余时间: {new_remaining}
-🔗 {server_url}{proxy_info}"""
-                    print(f"✅ 续期成功！")
+⏳ 剩余时间: {new_remaining}{proxy_info}"""
                     await tg_notify(msg)
                     result["success"] = True
 
@@ -396,20 +452,16 @@ async def try_renew_with_proxy(proxy_url: str, server_url: str, cookie_name: str
 ℹ️ 暂无需续期（冷却期内）
 📅 到期时间: {expiry_time}
 ⏳ 剩余时间: {remaining_time}{proxy_info}"""
-                        print(f"ℹ️ 冷却期内")
                         await tg_notify(msg)
-                        result["success"] = True  # 冷却期也算成功
+                        result["success"] = True
                     else:
                         result["message"] = f"续期失败: {error_detail}"
                 else:
-                    result["message"] = f"HTTP {status}: {body}"
+                    result["message"] = f"HTTP {status}"
             else:
-                # 未检测到 API 响应，需要换代理重试
                 result["need_retry"] = True
                 result["message"] = "未检测到 API 响应"
-                print(f"⚠️ 未检测到 API 响应，需要换代理重试")
 
-            # 提取新 cookie
             new_name, new_value = await extract_remember_cookie(context)
             if new_value and new_value != cookie_value:
                 result["new_cookie"] = new_value
@@ -417,7 +469,6 @@ async def try_renew_with_proxy(proxy_url: str, server_url: str, cookie_name: str
         except Exception as e:
             result["need_retry"] = True
             result["message"] = f"异常: {repr(e)}"
-            print(f"❌ {result['message']}")
 
         finally:
             await context.close()
@@ -435,36 +486,50 @@ async def add_server_time():
         await tg_notify("🎁 <b>Weirdhost 续订报告</b>\n\n❌ REMEMBER_WEB_COOKIE 未设置")
         return
 
+    proxies = []  # (proxy_url, label)
+    hy2_proc = None
+    
+    # 优先使用 Hysteria2
+    if HY2_URI:
+        hy2_proc = await start_hy2_client()
+        if hy2_proc:
+            proxies.append((f"socks5://127.0.0.1:{HY2_LOCAL_PORT}", "Hysteria2"))
+    
+    # 获取家宽代理
     print("🚀 获取家宽代理列表...")
-    proxies = await fetch_residential_proxies()
+    socks_proxies = await fetch_residential_proxies()
+    for p in socks_proxies:
+        proxies.append((p, p))
     
-    # 添加直连作为最后选项
-    proxies.append(None)
+    # 直连作为最后选项
+    proxies.append((None, "直连"))
     
-    for i, proxy in enumerate(proxies):
-        proxy_name = proxy or "直连"
-        print(f"\n🔄 [{i+1}/{len(proxies)}] 尝试: {proxy_name}")
+    try:
+        for i, (proxy_url, label) in enumerate(proxies):
+            print(f"\n🔄 [{i+1}/{len(proxies)}] 尝试: {label}")
+            
+            result = await try_renew_with_proxy(proxy_url, server_url, cookie_name, cookie_value, label)
+            
+            if result.get("new_cookie"):
+                await update_github_secret("REMEMBER_WEB_COOKIE", result["new_cookie"])
+            
+            if result["success"]:
+                print(f"✅ 使用 {label} 成功!")
+                return
+            
+            if not result["need_retry"]:
+                if result["message"]:
+                    await tg_notify(f"🎁 <b>Weirdhost 续订报告</b>\n\n❌ {result['message']}")
+                return
+            
+            print(f"⚠️ {label} 失败: {result['message']}")
         
-        result = await try_renew_with_proxy(proxy, server_url, cookie_name, cookie_value)
-        
-        # 更新 cookie
-        if result.get("new_cookie"):
-            await update_github_secret("REMEMBER_WEB_COOKIE", result["new_cookie"])
-        
-        if result["success"]:
-            print(f"✅ 使用 {proxy_name} 成功!")
-            return
-        
-        if not result["need_retry"]:
-            # 不需要重试的错误（如 cookie 失效）
-            if result["message"]:
-                await tg_notify(f"🎁 <b>Weirdhost 续订报告</b>\n\n❌ {result['message']}")
-            return
-        
-        print(f"⚠️ {proxy_name} 失败: {result['message']}，尝试下一个...")
+        await tg_notify("🎁 <b>Weirdhost 续订报告</b>\n\n❌ 所有代理均失败")
     
-    # 所有代理都失败
-    await tg_notify("🎁 <b>Weirdhost 续订报告</b>\n\n❌ 所有代理均失败，请检查网络或手动续期")
+    finally:
+        if hy2_proc:
+            hy2_proc.terminate()
+            print("🛑 Hysteria2 已停止")
 
 
 if __name__ == "__main__":
