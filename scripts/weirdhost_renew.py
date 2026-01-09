@@ -30,14 +30,11 @@ def parse_vless_uri(uri: str) -> dict:
         return None
     try:
         parsed = urlparse(uri)
-        uuid = parsed.username
-        server = parsed.hostname
-        port = parsed.port
         params = parse_qs(parsed.query)
         return {
-            "uuid": uuid,
-            "server": server,
-            "port": port,
+            "uuid": parsed.username,
+            "server": parsed.hostname,
+            "port": parsed.port,
             "security": params.get("security", ["none"])[0],
             "sni": params.get("sni", [""])[0],
             "type": params.get("type", ["tcp"])[0],
@@ -53,7 +50,6 @@ def parse_vless_uri(uri: str) -> dict:
 
 def generate_xray_config(vless: dict, local_port: int) -> dict:
     stream_settings = {"network": vless["type"]}
-    
     if vless["security"] == "tls":
         stream_settings["security"] = "tls"
         stream_settings["tlsSettings"] = {"serverName": vless["sni"]}
@@ -65,15 +61,9 @@ def generate_xray_config(vless: dict, local_port: int) -> dict:
             "publicKey": vless["pbk"],
             "shortId": vless["sid"],
         }
-    
-    vnext = {
-        "address": vless["server"],
-        "port": vless["port"],
-        "users": [{"id": vless["uuid"], "encryption": vless["encryption"]}]
-    }
+    vnext = {"address": vless["server"], "port": vless["port"], "users": [{"id": vless["uuid"], "encryption": vless["encryption"]}]}
     if vless["flow"]:
         vnext["users"][0]["flow"] = vless["flow"]
-    
     return {
         "inbounds": [{"port": local_port, "listen": "127.0.0.1", "protocol": "socks", "settings": {"udp": True}}],
         "outbounds": [{"protocol": "vless", "settings": {"vnext": [vnext]}, "streamSettings": stream_settings}]
@@ -83,18 +73,14 @@ def generate_xray_config(vless: dict, local_port: int) -> dict:
 async def start_xray_client() -> subprocess.Popen:
     if not VLESS_URI:
         return None
-    
     vless = parse_vless_uri(VLESS_URI)
     if not vless:
         print("⚠️ VLESS_URI 解析失败")
         return None
-    
     config = generate_xray_config(vless, XRAY_LOCAL_PORT)
-    
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
         json.dump(config, f)
         config_path = f.name
-    
     print(f"🚀 启动 Xray 客户端...")
     for xray_path in ["xray", "/usr/local/bin/xray", "/tmp/xray/xray"]:
         try:
@@ -122,9 +108,8 @@ def calculate_remaining_time(expiry_str: str) -> str:
         diff = expiry_dt - datetime.now()
         if diff.total_seconds() < 0:
             return "⚠️ 已过期"
-        days = diff.days
-        hours, remainder = divmod(diff.seconds, 3600)
-        minutes = remainder // 60
+        days, hours = diff.days, diff.seconds // 3600
+        minutes = (diff.seconds % 3600) // 60
         parts = []
         if days > 0:
             parts.append(f"{days}天")
@@ -149,8 +134,7 @@ def parse_renew_error(body: dict) -> str:
 
 
 def is_cooldown_error(error_detail: str) -> bool:
-    keywords = ["can only once at one time period", "can't renew", "cannot renew", "already renewed"]
-    return any(kw in error_detail.lower() for kw in keywords)
+    return any(kw in error_detail.lower() for kw in ["can only once at one time period", "can't renew", "cannot renew", "already renewed"])
 
 
 async def wait_for_cloudflare(page, max_wait: int = 120) -> bool:
@@ -158,17 +142,11 @@ async def wait_for_cloudflare(page, max_wait: int = 120) -> bool:
     await page.wait_for_timeout(3000)
     for i in range(max_wait):
         try:
-            is_cf = await page.evaluate("""
-                () => {
-                    if (document.querySelector('iframe[src*="challenges.cloudflare.com"]')) return true;
-                    if (document.querySelector('[data-sitekey]')) return true;
-                    if (document.querySelector('#challenge-running')) return true;
-                    const text = document.body.innerText || '';
-                    if (text.includes('Checking your browser') || text.includes('Just a moment') || 
-                        text.includes('Verify you are human')) return true;
-                    return false;
-                }
-            """)
+            is_cf = await page.evaluate("""() => {
+                if (document.querySelector('#challenge-running')) return true;
+                const text = document.body.innerText || '';
+                return text.includes('Checking your browser') || text.includes('Just a moment');
+            }""")
             if not is_cf:
                 await page.wait_for_timeout(2000)
                 print(f"✅ CF 验证通过 ({i+1}秒)")
@@ -182,20 +160,26 @@ async def wait_for_cloudflare(page, max_wait: int = 120) -> bool:
     return False
 
 
-async def wait_for_turnstile(page, max_wait: int = 60) -> bool:
-    print("🔄 检查 Turnstile 验证...")
+async def wait_for_turnstile_in_modal(page, max_wait: int = 120) -> bool:
+    """等待弹窗中的 Turnstile 验证完成"""
+    print("🔄 等待 Turnstile 验证...")
     for i in range(max_wait):
         try:
-            has_turnstile = await page.evaluate("""
-                () => {
-                    const iframe = document.querySelector('iframe[src*="challenges.cloudflare.com"]');
-                    if (!iframe) return false;
-                    const style = window.getComputedStyle(iframe);
-                    return style.display !== 'none' && style.visibility !== 'hidden';
-                }
-            """)
-            if not has_turnstile:
+            done = await page.evaluate("""() => {
+                // 检查隐藏的 turnstile response 字段是否有值
+                const input = document.querySelector('input[name*="turnstile"], input[name*="cf-turnstile"], [data-turnstile-response]');
+                if (input && input.value && input.value.length > 10) return true;
+                // 检查 iframe 状态
+                const iframe = document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+                if (!iframe) return true;
+                // 检查是否显示成功状态
+                const container = iframe.closest('div');
+                if (container && container.querySelector('[data-state="success"]')) return true;
+                return false;
+            }""")
+            if done:
                 print(f"✅ Turnstile 验证完成 ({i+1}秒)")
+                await page.wait_for_timeout(1000)
                 return True
             if i % 10 == 0:
                 print(f"⏳ Turnstile 验证中... ({i+1}/{max_wait}秒)")
@@ -210,23 +194,14 @@ async def wait_for_page_ready(page, max_wait: int = 30) -> bool:
     print("⏳ 等待页面内容加载...")
     for i in range(max_wait):
         try:
-            ready = await page.evaluate("""
-                () => {
-                    const buttons = document.querySelectorAll('button');
-                    for (const btn of buttons) {
-                        const text = btn.innerText || '';
-                        if (text.includes('시간추가') || text.includes('Add Time') || text.includes('Renew')) return true;
-                    }
-                    const bodyText = document.body.innerText || '';
-                    return bodyText.includes('유통기한') || bodyText.includes('Expiry');
-                }
-            """)
+            ready = await page.evaluate("""() => {
+                const bodyText = document.body.innerText || '';
+                return bodyText.includes('유통기한') || bodyText.includes('Expiry');
+            }""")
             if ready:
                 await page.wait_for_timeout(2000)
                 print(f"✅ 页面就绪 ({i+1}秒)")
                 return True
-            if i % 5 == 0:
-                print(f"⏳ 等待页面... ({i+1}/{max_wait}秒)")
         except:
             pass
         await page.wait_for_timeout(1000)
@@ -253,16 +228,14 @@ async def update_github_secret(secret_name: str, secret_value: str) -> bool:
                 if resp.status != 200:
                     return False
                 pk_data = await resp.json()
-            encrypted_value = encrypt_secret(pk_data["key"], secret_value)
-            async with session.put(f"https://api.github.com/repos/{repository}/actions/secrets/{secret_name}", headers=headers, json={"encrypted_value": encrypted_value, "key_id": pk_data["key_id"]}) as resp:
+            async with session.put(f"https://api.github.com/repos/{repository}/actions/secrets/{secret_name}", headers=headers, json={"encrypted_value": encrypt_secret(pk_data["key"], secret_value), "key_id": pk_data["key_id"]}) as resp:
                 return resp.status in (201, 204)
         except:
             return False
 
 
 async def tg_notify(message: str):
-    token = os.environ.get("TG_BOT_TOKEN")
-    chat_id = os.environ.get("TG_CHAT_ID")
+    token, chat_id = os.environ.get("TG_BOT_TOKEN"), os.environ.get("TG_CHAT_ID")
     if not token or not chat_id:
         return
     async with aiohttp.ClientSession() as session:
@@ -273,8 +246,7 @@ async def tg_notify(message: str):
 
 
 async def tg_notify_photo(photo_path: str, caption: str = ""):
-    token = os.environ.get("TG_BOT_TOKEN")
-    chat_id = os.environ.get("TG_CHAT_ID")
+    token, chat_id = os.environ.get("TG_BOT_TOKEN"), os.environ.get("TG_CHAT_ID")
     if not token or not chat_id:
         return
     async with aiohttp.ClientSession() as session:
@@ -292,8 +264,7 @@ async def tg_notify_photo(photo_path: str, caption: str = ""):
 
 async def extract_remember_cookie(context) -> tuple:
     try:
-        cookies = await context.cookies()
-        for cookie in cookies:
+        for cookie in await context.cookies():
             if cookie["name"].startswith("remember_web"):
                 return (cookie["name"], cookie["value"])
     except:
@@ -303,20 +274,17 @@ async def extract_remember_cookie(context) -> tuple:
 
 async def get_expiry_time(page) -> str:
     try:
-        return await page.evaluate("""
-            () => {
-                const text = document.body.innerText;
-                const match = text.match(/유통기한\\s*(\\d{4}-\\d{2}-\\d{2}(?:\\s+\\d{2}:\\d{2}:\\d{2})?)/);
-                if (match) return match[1].trim();
-                return 'Unknown';
-            }
-        """)
+        return await page.evaluate("""() => {
+            const text = document.body.innerText;
+            const match = text.match(/유통기한\\s*(\\d{4}-\\d{2}-\\d{2}(?:\\s+\\d{2}:\\d{2}:\\d{2})?)/);
+            return match ? match[1].trim() : 'Unknown';
+        }""")
     except:
         return "Unknown"
 
 
 async def find_renew_button(page):
-    for selector in ['button:has-text("시간추가")', 'button:has-text("Add Time")', 'button:has-text("Renew")']:
+    for selector in ['button:has-text("시간연장")', 'button:has-text("시간추가")', 'button:has-text("Add Time")']:
         try:
             locator = page.locator(selector)
             if await locator.count() > 0:
@@ -324,6 +292,32 @@ async def find_renew_button(page):
         except:
             continue
     return None
+
+
+async def click_modal_renew_button(page) -> bool:
+    """点击弹窗中的续期按钮"""
+    print("📌 点击弹窗中的续期按钮...")
+    
+    # 等待按钮可点击
+    await page.wait_for_timeout(1000)
+    
+    clicked = await page.evaluate("""() => {
+        const buttons = document.querySelectorAll('button');
+        for (const btn of buttons) {
+            const text = (btn.innerText || '').trim();
+            if (text === '시간추가' || text === 'Add Time') {
+                btn.click();
+                return true;
+            }
+        }
+        return false;
+    }""")
+    
+    if clicked:
+        print("✅ 已点击续期按钮")
+    else:
+        print("⚠️ 未找到续期按钮")
+    return clicked
 
 
 async def try_renew_with_proxy(proxy_url: str, server_url: str, cookie_name: str, cookie_value: str, proxy_label: str = None) -> dict:
@@ -375,8 +369,6 @@ async def try_renew_with_proxy(proxy_url: str, server_url: str, cookie_name: str
 
             if "/auth/login" in page.url or "/login" in page.url:
                 result["message"] = "Cookie 已失效"
-                await page.screenshot(path="login_failed.png", full_page=True)
-                await tg_notify_photo("login_failed.png", "🎁 <b>Weirdhost 续订报告</b>\n\n❌ Cookie 已失效")
                 return result
 
             print("✅ 登录成功")
@@ -384,30 +376,32 @@ async def try_renew_with_proxy(proxy_url: str, server_url: str, cookie_name: str
             remaining_time = calculate_remaining_time(expiry_time)
             print(f"📅 到期: {expiry_time} | 剩余: {remaining_time}")
 
+            # 点击页面上的续期按钮打开弹窗
             add_button = await find_renew_button(page)
             if not add_button:
                 result["need_retry"] = True
                 result["message"] = "未找到续期按钮"
                 return result
 
-            await add_button.wait_for(state="visible", timeout=10000)
-            await page.wait_for_timeout(1000)
-            print("📌 点击续期按钮...")
+            print("📌 点击续期按钮打开弹窗...")
             await add_button.click()
             await page.wait_for_timeout(3000)
-            await wait_for_turnstile(page, max_wait=60)
             
-            for _ in range(3):
-                try:
-                    checkbox = await page.wait_for_selector('input[type="checkbox"]:not([disabled])', timeout=3000)
-                    if checkbox:
-                        await checkbox.click()
-                        print("✅ 已点击复选框")
-                        break
-                except:
-                    await page.evaluate("document.querySelector('input[type=\"checkbox\"]:not([disabled])')?.click()")
-                await page.wait_for_timeout(1000)
+            # 等待弹窗中的 Turnstile 验证完成
+            if not await wait_for_turnstile_in_modal(page, max_wait=120):
+                result["need_retry"] = True
+                result["message"] = "Turnstile 验证超时"
+                await page.screenshot(path="turnstile_timeout.png", full_page=True)
+                await tg_notify_photo("turnstile_timeout.png", f"⚠️ Turnstile 验证超时{proxy_info}")
+                return result
             
+            # 点击弹窗中的续期按钮
+            if not await click_modal_renew_button(page):
+                result["need_retry"] = True
+                result["message"] = "未找到弹窗中的续期按钮"
+                return result
+            
+            # 等待 API 响应
             print("⏳ 等待续期 API 响应...")
             for i in range(60):
                 if renew_result["captured"]:
@@ -426,7 +420,6 @@ async def try_renew_with_proxy(proxy_url: str, server_url: str, cookie_name: str
                     await wait_for_page_ready(page, max_wait=20)
                     new_expiry = await get_expiry_time(page)
                     new_remaining = calculate_remaining_time(new_expiry)
-                    
                     msg = f"🎁 <b>Weirdhost 续订报告</b>\n\n✅ 续期成功！\n📅 新到期时间: {new_expiry}\n⏳ 剩余时间: {new_remaining}{proxy_info}"
                     await tg_notify(msg)
                     result["success"] = True
