@@ -21,7 +21,6 @@ PROXY_LIST_URL = os.environ.get("PROXY_LIST_URL", "")
 
 
 async def fetch_residential_proxies() -> list:
-    """获取家宽代理列表"""
     proxies = []
     if not PROXY_LIST_URL:
         print("⚠️ PROXY_LIST_URL 未设置，跳过代理")
@@ -88,17 +87,24 @@ def is_cooldown_error(error_detail: str) -> bool:
 
 async def wait_for_cloudflare(page, max_wait: int = 120) -> bool:
     print("🛡️ 等待 Cloudflare 验证...")
+    await page.wait_for_timeout(3000)
+    
     for i in range(max_wait):
         try:
             is_cf = await page.evaluate("""
                 () => {
                     if (document.querySelector('iframe[src*="challenges.cloudflare.com"]')) return true;
                     if (document.querySelector('[data-sitekey]')) return true;
-                    const text = document.body.innerText;
-                    return text.includes('Checking') || text.includes('moment') || text.includes('human');
+                    if (document.querySelector('#challenge-running')) return true;
+                    if (document.querySelector('.cf-browser-verification')) return true;
+                    const text = document.body.innerText || '';
+                    if (text.includes('Checking your browser') || text.includes('Just a moment') || 
+                        text.includes('Verify you are human') || text.includes('DDoS protection')) return true;
+                    return false;
                 }
             """)
             if not is_cf:
+                await page.wait_for_timeout(2000)
                 print(f"✅ CF 验证通过 ({i+1}秒)")
                 return True
             if i % 10 == 0:
@@ -110,22 +116,36 @@ async def wait_for_cloudflare(page, max_wait: int = 120) -> bool:
     return False
 
 
-async def wait_for_page_ready(page, max_wait: int = 15) -> bool:
+async def wait_for_page_ready(page, max_wait: int = 30) -> bool:
+    print("⏳ 等待页面内容加载...")
     for i in range(max_wait):
         try:
             ready = await page.evaluate("""
                 () => {
-                    const hasButton = document.querySelector('button') !== null;
-                    const hasContent = document.body.innerText.length > 100;
-                    return hasButton && hasContent;
+                    const buttons = document.querySelectorAll('button');
+                    for (const btn of buttons) {
+                        const text = btn.innerText || '';
+                        if (text.includes('시간추가') || text.includes('Add Time') || text.includes('Renew')) {
+                            return true;
+                        }
+                    }
+                    const bodyText = document.body.innerText || '';
+                    if (bodyText.includes('유통기한') || bodyText.includes('Expiry')) {
+                        return true;
+                    }
+                    return false;
                 }
             """)
             if ready:
+                await page.wait_for_timeout(2000)
                 print(f"✅ 页面就绪 ({i+1}秒)")
                 return True
+            if i % 5 == 0:
+                print(f"⏳ 等待页面... ({i+1}/{max_wait}秒)")
         except:
             pass
         await page.wait_for_timeout(1000)
+    print("⚠️ 页面加载超时")
     return False
 
 
@@ -236,7 +256,6 @@ async def find_renew_button(page):
 
 
 async def try_with_proxy(proxy_url: str, server_url: str, cookie_name: str, cookie_value: str) -> bool:
-    """测试代理是否能通过 CF 验证"""
     print(f"🔄 尝试代理: {proxy_url}")
     
     async with async_playwright() as p:
@@ -250,26 +269,28 @@ async def try_with_proxy(proxy_url: str, server_url: str, cookie_name: str, cook
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             )
             page = await context.new_page()
-            page.set_default_timeout(30000)
+            page.set_default_timeout(60000)
             
             await context.add_cookies([{"name": cookie_name, "value": cookie_value, "domain": "hub.weirdhost.xyz", "path": "/"}])
-            await page.goto(server_url, timeout=30000)
+            await page.goto(server_url, timeout=60000)
             
-            cf_passed = await wait_for_cloudflare(page, max_wait=30)
-            current_url = page.url
-            
-            await context.close()
-            await browser.close()
-            
-            if cf_passed and "/login" not in current_url:
-                return True
+            cf_passed = await wait_for_cloudflare(page, max_wait=60)
+            if cf_passed:
+                page_ready = await wait_for_page_ready(page, max_wait=30)
+                current_url = page.url
+                await context.close()
+                await browser.close()
+                if page_ready and "/login" not in current_url:
+                    return True
+            else:
+                await context.close()
+                await browser.close()
         except Exception as e:
             print(f"❌ 代理失败: {e}")
     return False
 
 
 async def run_main_logic(p, server_url: str, cookie_name: str, cookie_value: str, proxy_url: str):
-    """主逻辑"""
     launch_args = {
         "headless": True,
         "args": ['--disable-blink-features=AutomationControlled']
@@ -311,8 +332,13 @@ async def run_main_logic(p, server_url: str, cookie_name: str, cookie_value: str
         print(f"🌐 访问: {server_url}")
         await page.goto(server_url, timeout=90000)
         await wait_for_cloudflare(page, max_wait=120)
-        await page.wait_for_timeout(2000)
-        await wait_for_page_ready(page, max_wait=20)
+        
+        page_ready = await wait_for_page_ready(page, max_wait=30)
+        if not page_ready:
+            msg = f"🎁 <b>Weirdhost 续订报告</b>\n\n⚠️ 页面加载超时{proxy_info}"
+            await page.screenshot(path="page_timeout.png", full_page=True)
+            await tg_notify_photo("page_timeout.png", msg)
+            return
 
         if "/auth/login" in page.url or "/login" in page.url:
             msg = "🎁 <b>Weirdhost 续订报告</b>\n\n❌ Cookie 已失效，请手动更新"
@@ -382,7 +408,7 @@ async def run_main_logic(p, server_url: str, cookie_name: str, cookie_value: str
                 await page.wait_for_timeout(2000)
                 await page.reload()
                 await wait_for_cloudflare(page, max_wait=30)
-                await page.wait_for_timeout(3000)
+                await wait_for_page_ready(page, max_wait=20)
                 new_expiry = await get_expiry_time(page)
                 new_remaining = calculate_remaining_time(new_expiry)
                 
@@ -461,7 +487,6 @@ async def add_server_time():
     print("🚀 获取家宽代理列表...")
     proxies = await fetch_residential_proxies()
     
-    # 找到可用代理
     working_proxy = None
     for proxy in proxies:
         if await try_with_proxy(proxy, server_url, cookie_name, cookie_value):
@@ -473,7 +498,6 @@ async def add_server_time():
     if not working_proxy:
         print("⚠️ 无可用代理，使用直连模式")
     
-    # 使用可用代理或直连执行主逻辑
     async with async_playwright() as p:
         await run_main_logic(p, server_url, cookie_name, cookie_value, working_proxy)
 
