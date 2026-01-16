@@ -18,7 +18,7 @@ try:
 except ImportError:
     NACL_AVAILABLE = False
 
-DEFAULT_SERVER_URL = "https://hub.weirdhost.xyz/server/d341874c"
+DEFAULT_SERVER_URL = "https://hub.weirdhost.xyz/server/e235ada8"
 DEFAULT_COOKIE_NAME = "remember_web"
 ENABLE_DIRECT = False
 VLESS_URI = os.environ.get("VLESS_URI", "")
